@@ -146,7 +146,10 @@ options:
 
 fn parse_args() -> Result<Config, String> {
     let mut config = Config::default();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--bench")
+        .collect();
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
