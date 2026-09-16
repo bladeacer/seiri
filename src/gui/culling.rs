@@ -1,9 +1,6 @@
 use egui::{Pos2, Rect};
 
-/// Returns true if any part of the segment `a`-`b` lies within `rect`, using Liang-Barsky
-/// clipping. Used for edge frustum culling: an edge can be entirely outside the canvas at
-/// both endpoints while still passing through the visible viewport (e.g. a long edge between
-/// two off-screen nodes), so checking endpoint containment alone misses it.
+/// Returns true if any part of the segment `a`-`b` lies within `rect`, using Liang-Barsky clipping.
 pub fn segment_intersects_rect(a: Pos2, b: Pos2, rect: Rect) -> bool {
     let dx = b.x - a.x;
     let dy = b.y - a.y;

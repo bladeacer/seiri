@@ -54,8 +54,7 @@ impl Default for Config {
     }
 }
 
-/// The files a single language's benchmark run parses, plus a label describing
-/// where they came from. `_temp_dir` keeps generated corpora alive on disk.
+/// The files a single language's benchmark run parses, plus a label describing their source.
 struct Corpus {
     label: String,
     files: HashMap<PathBuf, Language>,
@@ -202,9 +201,7 @@ fn positive(value: String, flag: &str) -> Result<usize, String> {
     }
 }
 
-/// Builds the corpus to measure for `language`: a real checkout when one was
-/// supplied, otherwise a generated project. Returns `Ok(None)` when a real
-/// checkout contains no files of that language.
+/// Builds the corpus to measure for `language`.
 fn build_corpus(language: Language, config: &Config) -> Result<Option<Corpus>, String> {
     let Some(root) = config.real_paths.get(&language) else {
         return Ok(Some(synthetic_corpus(language, config.files)));
@@ -331,9 +328,7 @@ fn median_time<T, F: FnMut() -> T>(iterations: usize, mut run: F) -> Duration {
     durations[durations.len() / 2]
 }
 
-/// Checks both runs found the same files. Contents can't be compared directly
-/// (`FileNode` isn't `PartialEq`), but a diverging parse shows up as a differing
-/// file count long before it shows up in one of the fields.
+/// Checks both runs found the same files.
 fn same_files(
     sequential: &HashMap<PathBuf, FileNode>,
     parallel: &HashMap<PathBuf, FileNode>,

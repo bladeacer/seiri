@@ -28,9 +28,7 @@ pub fn parse_file(path: &Path, language: Language) -> Option<FileNode> {
 
 /// Parses every detected file one at a time.
 ///
-/// This is the reference implementation that [`parse_all_parallel`] is checked
-/// against, and the baseline `benches/parsing.rs` measures the parallel speedup
-/// from.
+/// This is the reference implementation that [`parse_all_parallel`] is checked against.
 pub fn parse_all_sequential(
     language_files: &HashMap<PathBuf, Language>,
 ) -> HashMap<PathBuf, FileNode> {
@@ -41,12 +39,6 @@ pub fn parse_all_sequential(
 }
 
 /// Parses every detected file across rayon's thread pool.
-///
-/// `on_file_parsed` runs on the worker thread that successfully finished
-/// parsing a file, so a caller can advance a progress bar without any
-/// worker printing for itself. Each parser constructs its own
-/// `tree_sitter::Parser` and nothing else is shared, so the calls are
-/// safe to run concurrently.
 pub fn parse_all_parallel<F>(
     language_files: &HashMap<PathBuf, Language>,
     on_file_parsed: F,

@@ -1,4 +1,4 @@
-//! Source file discovery: walking a project while honouring ignore files, and
+//! Source file discovery: walking a project while honoring ignore files, and
 //! bucketing the files it finds by [`Language`].
 
 use crate::core::defs::Language;
@@ -6,8 +6,7 @@ use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Classifies `target_file` by language, recording both the file and the
-/// detected language when it is supported.
+/// Classify `target_file` by language.
 pub fn detect_file_language(
     target_file: PathBuf,
     language_files: &mut HashMap<PathBuf, Language>,
@@ -19,9 +18,8 @@ pub fn detect_file_language(
     }
 }
 
-/// Walks `files_to_process`, filling `language_files` with every supported file
-/// and returning the set of languages present. Returns `None` when the project
-/// contains no supported files at all.
+/// Walks `files_to_process`, returning the set of languages present.
+/// Returns `None` when the project contains no supported files.
 pub fn detect_project_languages(
     files_to_process: &[PathBuf],
     language_files: &mut HashMap<PathBuf, Language>,

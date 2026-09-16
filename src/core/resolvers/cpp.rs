@@ -68,13 +68,6 @@ impl CppResolver {
     }
 
     /// Try to find a file in common include directories.
-    ///
-    /// The caller (GraphBuilder::build_graph_edges) only invokes this for
-    /// imports the parser already classified as local (quoted includes),
-    /// so we trust that classification here rather than re-filtering by
-    /// name against the stdlib/external prefix lists; a project's own
-    /// header can legitimately share a name with a stdlib/system header
-    /// (e.g. "windows.h", "string.h").
     fn find_include_file(&self, include_path: &str, from_file: &Path) -> Option<PathBuf> {
         let normalized = self.normalize_path(include_path);
 

@@ -99,8 +99,7 @@ impl Import {
         &self.path
     }
 
-    /// Check if this import is local (within the same project)
-    /// or external (from another project or library)
+    /// Check if this import is local.
     #[inline(always)]
     pub fn is_local(&self) -> bool {
         self.is_local
@@ -116,7 +115,7 @@ pub struct FileNode {
     imports: HashSet<Import>,
     /// List of function names defined in this file
     functions: HashSet<String>,
-    /// List of container names (classes, structs, etc.) defined in this file
+    /// List of container names defined in this file
     containers: HashSet<String>,
     /// List of references to external functions/containers (as strings)
     external_references: HashSet<String>,
@@ -202,8 +201,7 @@ impl GraphNode {
         self.edges.as_ref()
     }
 
-    /// Calculate the normalized size for this node based on min/max LOC and betweenness centrality
-    /// Returns a value between min_size and max_size
+    /// Calculate the normalized size for this node.
     pub fn calculate_size(
         &self,
         min_loc: u32,

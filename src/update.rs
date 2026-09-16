@@ -46,9 +46,7 @@ pub fn run_self_update(verbose: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks GitHub for a newer release and, if one is available, prints a short
-/// notice telling the user how to install it. Stays silent when already up to
-/// date or when the check fails for any reason (offline, rate limited, etc.).
+/// Checks GitHub for a newer release and prints a notification if one is available.
 pub fn notify_if_update_available() {
     let (tx, rx) = mpsc::channel();
 

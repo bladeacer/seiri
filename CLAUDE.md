@@ -12,6 +12,14 @@ Supported languages: Rust, Python, TypeScript, C++.
 
 This is production software, not a prototype. Practice TDD whenever possible: write a failing test that captures the expected behavior before writing the implementation, then implement to make it pass. Apply this to bug fixes too — reproduce with a failing test first, then fix. Beyond TDD, hold the line on good software engineering fundamentals: clear separation of concerns (don't blur the parser/resolver/analysis/layout/render boundaries described below), meaningful test coverage for new logic, small focused commits, and treating `cargo fmt`/`cargo clippy -- -D warnings` failures as blocking, not advisory.
 
+### Doc comment guidelines
+
+- Use American English spelling (e.g., "color" not "colour", "analyze" not "analyse", "honor" not "honour").
+- Limit em-dashes (—) in doc comments; prefer commas or parentheses.
+- Keep doc comments concise: describe what the item does, not why or how. Implementation details belong in inline comments, not doc comments.
+- Remove unnecessary additional info from doc comments (e.g., file paths, examples, explanation of algorithm internals) and move them to `CONTRIBUTING.md` or `CLAUDE.md` instead.
+- Avoid "Test T0XX:" or "Regression test for issue #XXX:" prefixes — the test name should be self-explanatory.
+
 ## Common commands
 
 ```sh

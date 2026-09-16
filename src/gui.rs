@@ -13,9 +13,7 @@ mod culling;
 
 use culling::segment_intersects_rect;
 
-/// Computes the point where a directed edge from `from` to `to` should terminate so it
-/// touches the boundary of the target node (a circle of `radius` centered at
-/// `to`) instead of piercing through to its center.
+/// Computes where a directed edge from `from` to `to` should terminate at the target node boundary.
 fn edge_tip_at_node_boundary(from: Pos2, to: Pos2, radius: f32) -> Pos2 {
     let delta = to - from;
     if delta.length_sq() <= f32::EPSILON {
@@ -24,10 +22,7 @@ fn edge_tip_at_node_boundary(from: Pos2, to: Pos2, radius: f32) -> Pos2 {
     to - delta.normalized() * radius
 }
 
-/// Build a petgraph mirroring the real dependency edges between `graph_nodes`,
-/// resolving each edge's file path to its target's actual index rather than
-/// assuming an edge's position within its source node's edge list matches the
-/// target's index in `graph_nodes`.
+/// Build a petgraph mirroring the dependency edges between `graph_nodes`.
 fn build_dependency_graph(graph_nodes: &[GraphNode]) -> Graph<(), ()> {
     let mut graph = Graph::new();
     let node_indices: Vec<NodeIndex> = graph_nodes.iter().map(|_| graph.add_node(())).collect();
@@ -50,10 +45,6 @@ fn build_dependency_graph(graph_nodes: &[GraphNode]) -> Graph<(), ()> {
 }
 
 /// Maps every node's file path to its index in `graph_nodes`.
-///
-/// Owning `PathBuf` keys (rather than borrowing them) keeps `SeiriGraph` free of
-/// a lifetime parameter; the clone is cheap because `PathBuf`'s buffer is
-/// reference counted.
 fn index_nodes_by_file(graph_nodes: &[GraphNode]) -> HashMap<PathBuf, usize> {
     let mut index = HashMap::with_capacity(graph_nodes.len());
     for (i, node) in graph_nodes.iter().enumerate() {
@@ -224,9 +215,7 @@ impl SeiriGraph {
         }
     }
 
-    /// Screen-space render radius of node `index`, accounting for LOC/betweenness sizing and
-    /// the current camera zoom. Shared by edge anchoring and node drawing so both agree on
-    /// where a node's boundary actually is.
+    /// Screen-space render radius of node `index`.
     fn node_screen_radius(&self, index: usize) -> f32 {
         let betweenness_score = self
             .graph_analysis
@@ -662,8 +651,7 @@ impl SeiriGraph {
         }
     }
 
-    /// Renders the controls panel on the top of the window.
-    /// Shows things like layout types, show/hide options, and zoom level.
+    /// Renders the controls panel.
     fn render_controls_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.horizontal(|ui| {
