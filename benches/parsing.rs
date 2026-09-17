@@ -18,6 +18,9 @@
 //! time of each alongside the speedup. The two runs are also checked for
 //! agreement, so a speedup is never reported for a parse that produced
 //! different output.
+//!
+//! Each row reports both the files it found and the files it parsed, and any
+//! file that could not be read or parsed is listed on stderr.
 
 use seiri_cli::core::defs::{FileNode, Language};
 use seiri_cli::discovery::{detect_project_languages, walk_directory};
@@ -34,6 +37,9 @@ const LANGUAGES: [Language; 4] = [
     Language::TypeScript,
     Language::Cpp,
 ];
+
+/// How many unparsed files each row lists before summarizing the rest.
+const REPORTED_FAILURES: usize = 5;
 
 struct Config {
     /// How many files to generate per language in the synthetic corpora.
@@ -76,8 +82,8 @@ fn main() {
     );
     println!("each mode timed {}x, median reported\n", config.iterations);
     println!(
-        "{:<11} {:<44} {:>7} {:>12} {:>12} {:>9}",
-        "language", "source", "files", "sequential", "parallel", "speedup"
+        "{:<11} {:<44} {:>7} {:>7} {:>12} {:>12} {:>9}",
+        "language", "source", "files", "parsed", "sequential", "parallel", "speedup"
     );
 
     for language in LANGUAGES {
@@ -98,17 +104,11 @@ fn main() {
         };
 
         let file_count = corpus.files.len();
-        let sequential = median_time(config.iterations, || parse_all_sequential(&corpus.files));
-        let parallel = median_time(config.iterations, || {
-            parse_all_parallel(&corpus.files, || {})
-        });
 
         // Never report a speedup for a parse that changed the output.
-        let (sequential_files, parallel_files) = (
-            parse_all_sequential(&corpus.files),
-            parse_all_parallel(&corpus.files, || {}),
-        );
-        if !same_files(&sequential_files, &parallel_files) {
+        let sequential_files = parse_all_sequential(&corpus.files);
+        let parallel_files = parse_all_parallel(&corpus.files, || {});
+        if !same_files(sequential_files.nodes(), parallel_files.nodes()) {
             eprintln!(
                 "error: parallel parsing disagreed with sequential parsing for {}",
                 language.to_string()
@@ -116,15 +116,23 @@ fn main() {
             std::process::exit(1);
         }
 
+        let sequential = median_time(config.iterations, || parse_all_sequential(&corpus.files));
+        let parallel = median_time(config.iterations, || {
+            parse_all_parallel(&corpus.files, || {})
+        });
+
         println!(
-            "{:<11} {:<44} {:>7} {:>12} {:>12} {:>8}",
+            "{:<11} {:<44} {:>7} {:>7} {:>12} {:>12} {:>8}",
             language.to_string(),
             corpus.label,
             file_count,
+            sequential_files.nodes().len(),
             format_duration(sequential),
             format_duration(parallel),
             format_speedup(sequential, parallel),
         );
+
+        report_failures(language, sequential_files.failed(), file_count);
     }
 }
 
@@ -326,6 +334,29 @@ fn median_time<T, F: FnMut() -> T>(iterations: usize, mut run: F) -> Duration {
 
     durations.sort_unstable();
     durations[durations.len() / 2]
+}
+
+/// Lists the files that could not be parsed, so an incomplete parse is never
+/// reported as a clean run.
+fn report_failures(language: Language, failed: &[PathBuf], discovered: usize) {
+    if failed.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "{:<11} {} of {discovered} file(s) could not be read or parsed:",
+        language.to_string(),
+        failed.len()
+    );
+    for path in failed.iter().take(REPORTED_FAILURES) {
+        eprintln!("            {}", path.display());
+    }
+    if failed.len() > REPORTED_FAILURES {
+        eprintln!(
+            "            ... and {} more",
+            failed.len() - REPORTED_FAILURES
+        );
+    }
 }
 
 /// Checks both runs found the same files.

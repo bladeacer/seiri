@@ -1,10 +1,54 @@
 use crate::core::defs::{FileNode, Import, Language};
-use crate::parsers::get_text;
+use crate::parsers::{advance, get_text};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use tree_sitter::Parser;
+use std::sync::LazyLock;
+use tree_sitter::{Node, Parser};
 use tree_sitter_cpp as ts_cpp;
+
+/// Node kinds this parser acts on, as numeric ids so the tree walk compares
+/// `u16`s instead of node kind names.
+struct CppKinds {
+    preproc_include: u16,
+    function_definition: u16,
+    class_specifier: u16,
+    struct_specifier: u16,
+    union_specifier: u16,
+    enum_specifier: u16,
+    qualified_identifier: u16,
+    call_expression: u16,
+    type_identifier: u16,
+}
+
+impl CppKinds {
+    fn new() -> Self {
+        let language: tree_sitter::Language = ts_cpp::LANGUAGE.into();
+        let id = |kind: &str| language.id_for_node_kind(kind, true);
+        CppKinds {
+            preproc_include: id("preproc_include"),
+            function_definition: id("function_definition"),
+            class_specifier: id("class_specifier"),
+            struct_specifier: id("struct_specifier"),
+            union_specifier: id("union_specifier"),
+            enum_specifier: id("enum_specifier"),
+            qualified_identifier: id("qualified_identifier"),
+            call_expression: id("call_expression"),
+            type_identifier: id("type_identifier"),
+        }
+    }
+
+    /// Whether `id` declares a class, struct, union, or enum.
+    fn is_container_declaration(&self, id: u16) -> bool {
+        id == self.class_specifier
+            || id == self.struct_specifier
+            || id == self.union_specifier
+            || id == self.enum_specifier
+    }
+}
+
+/// Resolved once per process: looking ids up walks the grammar's symbol tables.
+static KINDS: LazyLock<CppKinds> = LazyLock::new(CppKinds::new);
 
 /// Determine if an include is local (quoted) vs system (angle brackets)
 #[allow(dead_code)]
@@ -185,10 +229,23 @@ const MACRO_INCLUDE_PATTERNS: &[&str] = &[
 fn extract_macro_includes(code: &str) -> HashSet<Import> {
     let mut includes = HashSet::new();
 
+    // The line-by-line scan below only ever finds something when the file mentions
+    // one of the patterns, and most files never do.
+    if !MACRO_INCLUDE_PATTERNS
+        .iter()
+        .any(|pattern| code.contains(pattern))
+    {
+        return includes;
+    }
+
     // Look for patterns like PATTERN("file.h") or PATTERN(<file.h>)
     for line in code.lines() {
+        if !line.contains('(') {
+            continue;
+        }
+
         for pattern in MACRO_INCLUDE_PATTERNS {
-            if line.contains(pattern) && line.contains('(') {
+            if line.contains(pattern) {
                 // Extract quoted path
                 if let Some(first_quote) = line.find('"')
                     && let Some(second_quote) = line[first_quote + 1..].find('"')
@@ -210,6 +267,13 @@ fn extract_macro_includes(code: &str) -> HashSet<Import> {
     includes
 }
 
+/// Records the name of a class, struct, union, or enum declaration, if it has one.
+fn insert_container_name(node: Node, code: &str, containers: &mut HashSet<String>) {
+    if let Some(name_node) = node.child_by_field_name("name") {
+        containers.insert(get_text(name_node, code));
+    }
+}
+
 pub fn parse_cpp_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
     let code = fs::read_to_string(&path).ok()?;
     let loc = code.matches('\n').count() as u32 + 1;
@@ -224,24 +288,21 @@ pub fn parse_cpp_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
     let mut containers = HashSet::new();
     let mut external_references = HashSet::new();
 
-    // Traverse the syntax tree
-    let mut stack = vec![root_node];
+    // Traverse the syntax tree, one cursor for the whole file
+    let kinds = &*KINDS;
+    let mut cursor = root_node.walk();
 
-    while let Some(node) = stack.pop() {
-        // Push children onto stack for DFS
-        let mut node_cursor = node.walk();
-        for child in node.children(&mut node_cursor) {
-            stack.push(child);
-        }
+    loop {
+        let node = cursor.node();
 
-        match node.kind() {
-            "preproc_include" => {
+        match node.kind_id() {
+            id if id == kinds.preproc_include => {
                 // Extract include path
                 if let Some((include_path, is_local)) = extract_include_path(node, &code) {
                     imports.insert(Import::new(include_path, is_local));
                 }
             }
-            "function_definition" => {
+            id if id == kinds.function_definition => {
                 // Extract function name
                 if let Some(declarator_node) = node.child_by_field_name("declarator")
                     && let Some(name) = extract_declarator_name(declarator_node, &code)
@@ -249,53 +310,35 @@ pub fn parse_cpp_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
                     functions.insert(name);
                 }
             }
-            "class_specifier" | "struct_specifier" | "union_specifier" => {
-                // Extract class/struct/union name
-                let mut spec_cursor = node.walk();
-                for child in node.children(&mut spec_cursor) {
-                    if child.kind() == "identifier" {
-                        containers.insert(get_text(child, &code));
-                        break;
-                    }
-                }
-            }
-            "enum_specifier" => {
-                // Extract enum name
-                let mut enum_cursor = node.walk();
-                for child in node.children(&mut enum_cursor) {
-                    if child.kind() == "identifier" {
-                        containers.insert(get_text(child, &code));
-                        break;
-                    }
-                }
+            id if kinds.is_container_declaration(id) => {
+                insert_container_name(node, &code, &mut containers);
             }
             // Qualified identifiers, e.g. `ns::helper`, `Foo::method`
-            "qualified_identifier" => {
+            id if id == kinds.qualified_identifier => {
                 external_references.insert(get_text(node, &code));
             }
             // `foo()`, `ns::helper()` - record the callee, not the whole call
-            "call_expression" => {
+            id if id == kinds.call_expression => {
                 if let Some(function_node) = node.child_by_field_name("function") {
                     external_references.insert(get_text(function_node, &code));
                 }
             }
             // Type references (parameter/variable/return types, etc.), but not
             // the declaration's own name
-            "type_identifier" => {
+            id if id == kinds.type_identifier => {
                 let is_declaration_name = node.parent().is_some_and(|parent| {
-                    matches!(
-                        parent.kind(),
-                        "class_specifier"
-                            | "struct_specifier"
-                            | "union_specifier"
-                            | "enum_specifier"
-                    ) && parent.child_by_field_name("name") == Some(node)
+                    kinds.is_container_declaration(parent.kind_id())
+                        && parent.child_by_field_name("name") == Some(node)
                 });
                 if !is_declaration_name {
                     external_references.insert(get_text(node, &code));
                 }
             }
             _ => {}
+        }
+
+        if !advance(&mut cursor) {
+            break;
         }
     }
 
@@ -323,6 +366,54 @@ mod tests {
         file.write_all(content.as_bytes())
             .expect("Failed to write to temp file");
         file
+    }
+
+    #[test]
+    fn containers_are_recorded_for_named_declarations() {
+        let content = "struct Foo {};\nclass Bar {};\nunion Baz {};\nenum Qux { A };\n";
+        let temp_file = create_test_file(content);
+        let result = parse_cpp_file(temp_file.path()).expect("Failed to parse");
+
+        assert_eq!(
+            result.containers().len(),
+            4,
+            "containers: {:?}",
+            result.containers()
+        );
+        for name in ["Foo", "Bar", "Baz", "Qux"] {
+            assert!(
+                result.containers().contains(name),
+                "missing {name} in {:?}",
+                result.containers()
+            );
+        }
+    }
+
+    #[test]
+    fn anonymous_declarations_record_no_container() {
+        let content = "struct { int value; } holder;\nenum { A, B } letters;\n";
+        let temp_file = create_test_file(content);
+        let result = parse_cpp_file(temp_file.path()).expect("Failed to parse");
+
+        assert!(result.containers().is_empty(), "{:?}", result.containers());
+    }
+
+    #[test]
+    fn every_dispatched_node_kind_resolves_to_an_id() {
+        // an unknown kind would resolve to 0 and silently collide with the others
+        for id in [
+            KINDS.preproc_include,
+            KINDS.function_definition,
+            KINDS.class_specifier,
+            KINDS.struct_specifier,
+            KINDS.union_specifier,
+            KINDS.enum_specifier,
+            KINDS.qualified_identifier,
+            KINDS.call_expression,
+            KINDS.type_identifier,
+        ] {
+            assert_ne!(id, 0);
+        }
     }
 
     #[test]

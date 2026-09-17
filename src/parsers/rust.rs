@@ -1,10 +1,52 @@
 use crate::core::defs::{FileNode, Import, Language};
-use crate::parsers::get_text;
+use crate::parsers::{advance, descend_into, get_text, skip_children};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 use tree_sitter::Parser;
 use tree_sitter_rust as ts_rust;
+
+/// Node kinds this parser acts on, as numeric ids so the tree walk compares
+/// `u16`s instead of node kind names.
+struct RustKinds {
+    identifier: u16,
+    type_identifier: u16,
+    semicolon: u16,
+    use_declaration: u16,
+    mod_item: u16,
+    function_item: u16,
+    function_signature_item: u16,
+    struct_item: u16,
+    enum_item: u16,
+    trait_item: u16,
+    impl_item: u16,
+    scoped_identifier: u16,
+}
+
+impl RustKinds {
+    fn new() -> Self {
+        let language: tree_sitter::Language = ts_rust::LANGUAGE.into();
+        let id = |kind: &str| language.id_for_node_kind(kind, true);
+        RustKinds {
+            identifier: id("identifier"),
+            type_identifier: id("type_identifier"),
+            semicolon: language.id_for_node_kind(";", false),
+            use_declaration: id("use_declaration"),
+            mod_item: id("mod_item"),
+            function_item: id("function_item"),
+            function_signature_item: id("function_signature_item"),
+            struct_item: id("struct_item"),
+            enum_item: id("enum_item"),
+            trait_item: id("trait_item"),
+            impl_item: id("impl_item"),
+            scoped_identifier: id("scoped_identifier"),
+        }
+    }
+}
+
+/// Resolved once per process: looking ids up walks the grammar's symbol tables.
+static KINDS: LazyLock<RustKinds> = LazyLock::new(RustKinds::new);
 
 /// Determine if an import is local (starts with crate/self/super or current mod).
 fn is_local_import(import_path: &str, file_path: &Path) -> bool {
@@ -104,12 +146,17 @@ fn parser_loop<P: AsRef<Path>>(
     let mut containers = HashSet::new();
     let mut external_references = HashSet::new();
 
+    // Traverse the syntax tree, one cursor for the whole file
+    let kinds = &*KINDS;
     let mut cursor = root_node.walk();
-    let mut stack = vec![root_node];
 
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            "use_declaration" => {
+    loop {
+        let node = cursor.node();
+        let mut skip_subtree = false;
+        let mut descend_into_body = None;
+
+        match node.kind_id() {
+            id if id == kinds.use_declaration => {
                 let import_paths = extract_use_paths(node, code);
                 for import_path in import_paths {
                     if !import_path.is_empty() {
@@ -118,17 +165,18 @@ fn parser_loop<P: AsRef<Path>>(
                     }
                 }
                 // don't descend further, otherwise the same scoped_identifier/identifier nodes get re-visited
-                continue;
+                skip_subtree = true;
             }
-            "mod_item" => {
+            id if id == kinds.mod_item => {
                 // Handle module declarations like "pub mod python;" or "mod utils;"
                 let mut mod_name = String::new();
                 let mut is_declaration = false;
 
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "identifier" {
+                let mut child_cursor = node.walk();
+                for child in node.children(&mut child_cursor) {
+                    if child.kind_id() == kinds.identifier {
                         mod_name = get_text(child, code);
-                    } else if child.kind() == ";" {
+                    } else if child.kind_id() == kinds.semicolon {
                         // If we find a semicolon, this is a module declaration (not inline definition)
                         is_declaration = true;
                     }
@@ -139,45 +187,48 @@ fn parser_loop<P: AsRef<Path>>(
                     imports.insert(Import::new(mod_name, true));
                 }
             }
-            "function_item" | "function_signature_item" => {
+            id if id == kinds.function_item || id == kinds.function_signature_item => {
                 // Get function name - look for the first identifier after any visibility modifiers
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "identifier" {
+                let mut child_cursor = node.walk();
+                for child in node.children(&mut child_cursor) {
+                    if child.kind_id() == kinds.identifier {
                         let name = get_text(child, code);
                         functions.insert(name);
                     }
                 }
             }
-            "struct_item" | "enum_item" | "trait_item" => {
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "type_identifier" {
+            id if id == kinds.struct_item || id == kinds.enum_item || id == kinds.trait_item => {
+                let mut child_cursor = node.walk();
+                for child in node.children(&mut child_cursor) {
+                    if child.kind_id() == kinds.type_identifier {
                         let name = get_text(child, code);
                         containers.insert(name);
                     }
                 }
             }
-            "impl_item" => {
+            id if id == kinds.impl_item => {
                 // impl target type and implemented trait name are declaration
                 // sites, not container definitions or external usages
-                if let Some(body) = node.child_by_field_name("body") {
-                    stack.push(body);
-                }
-                continue;
+                descend_into_body = node.child_by_field_name("body");
             }
             // For external references, look for scoped identifiers (e.g., foo::bar)
-            "scoped_identifier" => {
+            id if id == kinds.scoped_identifier => {
                 let text = get_text(node, code);
                 external_references.insert(text);
             }
             _ => {}
         }
 
-        // push children onto stack
-        let mut child_cursor = node.walk();
-        for child in node.children(&mut child_cursor) {
-            stack.push(child);
+        let advanced = if let Some(body) = descend_into_body {
+            descend_into(&mut cursor, body) || skip_children(&mut cursor)
+        } else if skip_subtree {
+            skip_children(&mut cursor)
+        } else {
+            advance(&mut cursor)
+        };
+
+        if !advanced {
+            break;
         }
     }
 
@@ -217,6 +268,67 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
+    }
+
+    #[test]
+    fn every_dispatched_node_kind_resolves_to_an_id() {
+        // an unknown kind would resolve to 0 and silently collide with the others
+        for id in [
+            KINDS.identifier,
+            KINDS.type_identifier,
+            KINDS.semicolon,
+            KINDS.use_declaration,
+            KINDS.mod_item,
+            KINDS.function_item,
+            KINDS.function_signature_item,
+            KINDS.struct_item,
+            KINDS.enum_item,
+            KINDS.trait_item,
+            KINDS.impl_item,
+            KINDS.scoped_identifier,
+        ] {
+            assert_ne!(id, 0);
+        }
+    }
+
+    #[test]
+    fn impl_bodies_are_walked_but_impl_headers_are_not() {
+        let temp_dir = TempDir::new().unwrap();
+        let content = r#"
+impl std::fmt::Display for Thing {
+    fn fmt(&self) { self::helper(); }
+}
+"#;
+        let file_path = create_test_file(&temp_dir, "test.rs", content);
+
+        let result = parse_rust_file(&file_path).unwrap();
+
+        // the trait path is a declaration site, not a usage
+        assert!(!result.external_references().contains("std::fmt::Display"));
+        // functions and usages inside the body are still collected
+        assert!(result.functions().contains("fmt"));
+        assert!(result.external_references().contains("self::helper"));
+    }
+
+    #[test]
+    fn use_declaration_subtrees_do_not_leak_external_references() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = create_test_file(
+            &temp_dir,
+            "test.rs",
+            "use std::collections::HashMap;\n\nfn build() {}\n",
+        );
+
+        let result = parse_rust_file(&file_path).unwrap();
+
+        assert!(
+            result
+                .imports()
+                .iter()
+                .any(|i| i.path() == "std::collections::HashMap")
+        );
+        assert!(!result.external_references().contains("std::collections"));
+        assert!(result.functions().contains("build"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use clap::{Parser, crate_name, crate_version};
 use indicatif::{ProgressBar, ProgressStyle};
-use seiri_cli::core::defs::{FileNode, Language};
+use seiri_cli::core::defs::Language;
 use seiri_cli::core::resolvers::GraphBuilder;
 use seiri_cli::discovery::{detect_project_languages, walk_directory};
 use seiri_cli::export;
@@ -92,12 +92,11 @@ fn main() {
     }
 }
 
-/// Parses every detected file in parallel, returning the successfully
-/// parsed files indexed by path.
+/// Parses every detected file in parallel, warning about the files it could not parse.
 fn parse_project_files(
     language_files: &HashMap<PathBuf, Language>,
     verbose: bool,
-) -> HashMap<PathBuf, FileNode> {
+) -> parsers::ParseOutcome {
     let progress = if !verbose && language_files.len() > PROGRESS_BAR_MIN_FILES {
         let bar = ProgressBar::new(language_files.len() as u64);
         bar.set_style(
@@ -111,11 +110,15 @@ fn parse_project_files(
         ProgressBar::hidden()
     };
 
-    let node_map = parsers::parse_all_parallel(language_files, || progress.inc(1));
+    let outcome = parsers::parse_all_parallel(language_files, || progress.inc(1));
     progress.finish_with_message("parsing complete");
 
+    if let Some(warning) = unparsed_files_warning(outcome.failed(), verbose) {
+        eprintln!("{warning}");
+    }
+
     if verbose {
-        let mut parsed_paths: Vec<&PathBuf> = node_map.keys().collect();
+        let mut parsed_paths: Vec<&PathBuf> = outcome.nodes().keys().collect();
         parsed_paths.sort();
         for path in parsed_paths {
             let language = language_files
@@ -126,7 +129,41 @@ fn parse_project_files(
         }
     }
 
-    node_map
+    outcome
+}
+
+/// How many unparsed files are listed when not running verbosely.
+const UNPARSED_FILES_LISTED: usize = 5;
+
+/// Describes the files that could not be parsed, or `None` when every file parsed.
+///
+/// Lists a sample of the paths unless `verbose`, which lists all of them.
+fn unparsed_files_warning(failed: &[PathBuf], verbose: bool) -> Option<String> {
+    if failed.is_empty() {
+        return None;
+    }
+
+    let listed = if verbose {
+        failed.len()
+    } else {
+        failed.len().min(UNPARSED_FILES_LISTED)
+    };
+
+    let mut warning = format!(
+        "Warning: {} file(s) could not be read or parsed, so they are missing from the graph",
+        failed.len()
+    );
+    for path in &failed[..listed] {
+        warning.push_str(&format!("\n  {}", path.display()));
+    }
+    if listed < failed.len() {
+        warning.push_str(&format!(
+            "\n  ... and {} more (pass --verbose to list them all)",
+            failed.len() - listed
+        ));
+    }
+
+    Some(warning)
 }
 
 fn run(args: Cli) -> Result<(), String> {
@@ -170,7 +207,7 @@ fn run(args: Cli) -> Result<(), String> {
         .ok_or_else(|| "No supported language files found in the project".to_string())?;
 
     // Parse files and collect Nodes, indexed by file path
-    let node_map = parse_project_files(&language_files, verbose);
+    let node_map = parse_project_files(&language_files, verbose).into_nodes();
 
     // Build GraphNodes with multi-language support
     let mut graph_builder = GraphBuilder::new();
@@ -296,6 +333,7 @@ fn confirm_overwrite<R: BufRead>(path: &Path, force: bool, reader: &mut R) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seiri_cli::core::defs::FileNode;
     use seiri_cli::layout::{self, Layout};
     use seiri_cli::parsers::cpp::parse_cpp_file;
     use std::fs;
@@ -414,10 +452,11 @@ mod tests {
 
         let parsed = parse_project_files(&language_files, false);
 
-        assert_eq!(parsed.len(), language_files.len());
+        assert_eq!(parsed.nodes().len(), language_files.len());
+        assert!(parsed.failed().is_empty());
         // LOC is counted as newlines plus one, since the last line may be unterminated.
         assert_eq!(
-            parsed.get(&rust_file).map(|node| node.loc()),
+            parsed.nodes().get(&rust_file).map(|node| node.loc()),
             Some(rust_contents.matches('\n').count() as u32 + 1)
         );
     }
@@ -429,6 +468,29 @@ mod tests {
         assert!(args.update);
         assert!(args.project_path.is_none());
         assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn unparsed_files_warning_is_silent_when_every_file_parsed() {
+        assert!(unparsed_files_warning(&[], false).is_none());
+        assert!(unparsed_files_warning(&[], true).is_none());
+    }
+
+    #[test]
+    fn unparsed_files_warning_counts_files_and_samples_paths() {
+        let failed: Vec<PathBuf> = (0..8)
+            .map(|i| PathBuf::from(format!("bad{i}.rs")))
+            .collect();
+
+        let warning = unparsed_files_warning(&failed, false).expect("warning expected");
+        assert!(warning.contains("8 file(s)"));
+        assert!(warning.contains("bad0.rs"));
+        assert!(!warning.contains("bad7.rs"));
+        assert!(warning.contains("... and 3 more"));
+
+        let verbose = unparsed_files_warning(&failed, true).expect("warning expected");
+        assert!(verbose.contains("bad7.rs"));
+        assert!(!verbose.contains("more"));
     }
 
     #[test]

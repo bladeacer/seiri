@@ -1,10 +1,44 @@
 use crate::core::defs::{FileNode, Import, Language};
-use crate::parsers::get_text;
+use crate::parsers::{advance, get_text};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 use tree_sitter::Parser;
 use tree_sitter_python as ts_python;
+
+/// Node kinds this parser acts on, as numeric ids so the tree walk compares
+/// `u16`s instead of node kind names.
+struct PythonKinds {
+    identifier: u16,
+    import_statement: u16,
+    import_from_statement: u16,
+    function_definition: u16,
+    class_definition: u16,
+    block: u16,
+    attribute: u16,
+    call: u16,
+}
+
+impl PythonKinds {
+    fn new() -> Self {
+        let language: tree_sitter::Language = ts_python::LANGUAGE.into();
+        let id = |kind: &str| language.id_for_node_kind(kind, true);
+        PythonKinds {
+            identifier: id("identifier"),
+            import_statement: id("import_statement"),
+            import_from_statement: id("import_from_statement"),
+            function_definition: id("function_definition"),
+            class_definition: id("class_definition"),
+            block: id("block"),
+            attribute: id("attribute"),
+            call: id("call"),
+        }
+    }
+}
+
+/// Resolved once per process: looking ids up walks the grammar's symbol tables.
+static KINDS: LazyLock<PythonKinds> = LazyLock::new(PythonKinds::new);
 
 /// Determine if an import is local. In Python, local imports are typically relative (starting with .) or
 /// match the project's package structure.
@@ -184,13 +218,15 @@ pub fn parse_python_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
     let mut containers = HashSet::new();
     let mut external_references = HashSet::new();
 
-    // Traverse the syntax tree
+    // Traverse the syntax tree, one cursor for the whole file
+    let kinds = &*KINDS;
     let mut cursor = root_node.walk();
-    let mut stack = vec![root_node];
 
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            "import_statement" | "import_from_statement" => {
+    loop {
+        let node = cursor.node();
+
+        match node.kind_id() {
+            id if id == kinds.import_statement || id == kinds.import_from_statement => {
                 // Handle both "import foo" and "from foo import bar"
                 let import_paths = extract_import_path(node, &code);
                 for import_path in import_paths {
@@ -198,33 +234,35 @@ pub fn parse_python_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
                     imports.insert(Import::new(import_path, is_local));
                 }
             }
-            "function_definition" => {
+            id if id == kinds.function_definition => {
                 // Get function name
+                let mut name_cursor = node.walk();
                 if let Some(name_node) = node
-                    .children(&mut cursor)
-                    .find(|n| n.kind() == "identifier")
+                    .children(&mut name_cursor)
+                    .find(|n| n.kind_id() == kinds.identifier)
                 {
                     let name = get_text(name_node, &code);
-                    let in_function = node.parent().is_some_and(|p| p.kind() == "block")
-                        && node
-                            .parent()
-                            .unwrap()
-                            .parent()
-                            .is_some_and(|p| p.kind() == "function_definition");
+                    let in_function = node.parent().is_some_and(|parent| {
+                        parent.kind_id() == kinds.block
+                            && parent.parent().is_some_and(|grandparent| {
+                                grandparent.kind_id() == kinds.function_definition
+                            })
+                    });
                     if (!name.starts_with('_') || name.starts_with("__")) && !in_function {
                         functions.insert(name);
                     }
                 }
             }
-            "class_definition" => {
+            id if id == kinds.class_definition => {
+                let mut name_cursor = node.walk();
                 if let Some(name_node) = node
-                    .children(&mut cursor)
-                    .find(|n| n.kind() == "identifier")
+                    .children(&mut name_cursor)
+                    .find(|n| n.kind_id() == kinds.identifier)
                 {
                     containers.insert(get_text(name_node, &code));
                 }
             }
-            "attribute" | "call" => {
+            id if id == kinds.attribute || id == kinds.call => {
                 // Collect external references from attribute access and function calls,
                 // normalized to the callee/attribute path with argument text stripped
                 let text = callee_text(node, &code);
@@ -236,8 +274,8 @@ pub fn parse_python_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
             _ => {}
         }
 
-        for child in node.children(&mut cursor) {
-            stack.push(child);
+        if !advance(&mut cursor) {
+            break;
         }
     }
 
@@ -264,6 +302,23 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
+    }
+
+    #[test]
+    fn every_dispatched_node_kind_resolves_to_an_id() {
+        // an unknown kind would resolve to 0 and silently collide with the others
+        for id in [
+            KINDS.identifier,
+            KINDS.import_statement,
+            KINDS.import_from_statement,
+            KINDS.function_definition,
+            KINDS.class_definition,
+            KINDS.block,
+            KINDS.attribute,
+            KINDS.call,
+        ] {
+            assert_ne!(id, 0);
+        }
     }
 
     #[test]

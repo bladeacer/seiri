@@ -1,10 +1,66 @@
 use crate::core::defs::{FileNode, Import, Language};
-use crate::parsers::get_text;
+use crate::parsers::{advance, get_text};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 use tree_sitter::Parser;
 use tree_sitter_typescript as ts_typescript;
+
+/// Node kinds this parser acts on, as numeric ids so the tree walk compares
+/// `u16`s instead of node kind names.
+struct TypeScriptKinds {
+    import_statement: u16,
+    export_statement: u16,
+    function_declaration: u16,
+    method_definition: u16,
+    lexical_declaration: u16,
+    variable_declaration: u16,
+    class_declaration: u16,
+    interface_declaration: u16,
+    enum_declaration: u16,
+    type_alias_declaration: u16,
+    member_expression: u16,
+    call_expression: u16,
+    new_expression: u16,
+    type_identifier: u16,
+    nested_type_identifier: u16,
+}
+
+impl TypeScriptKinds {
+    fn new() -> Self {
+        let language: tree_sitter::Language = ts_typescript::LANGUAGE_TYPESCRIPT.into();
+        let id = |kind: &str| language.id_for_node_kind(kind, true);
+        TypeScriptKinds {
+            import_statement: id("import_statement"),
+            export_statement: id("export_statement"),
+            function_declaration: id("function_declaration"),
+            method_definition: id("method_definition"),
+            lexical_declaration: id("lexical_declaration"),
+            variable_declaration: id("variable_declaration"),
+            class_declaration: id("class_declaration"),
+            interface_declaration: id("interface_declaration"),
+            enum_declaration: id("enum_declaration"),
+            type_alias_declaration: id("type_alias_declaration"),
+            member_expression: id("member_expression"),
+            call_expression: id("call_expression"),
+            new_expression: id("new_expression"),
+            type_identifier: id("type_identifier"),
+            nested_type_identifier: id("nested_type_identifier"),
+        }
+    }
+
+    /// Whether `id` declares a named container.
+    fn is_declaration_kind(&self, id: u16) -> bool {
+        id == self.class_declaration
+            || id == self.interface_declaration
+            || id == self.enum_declaration
+            || id == self.type_alias_declaration
+    }
+}
+
+/// Resolved once per process: looking ids up walks the grammar's symbol tables.
+static KINDS: LazyLock<TypeScriptKinds> = LazyLock::new(TypeScriptKinds::new);
 
 /// Local imports are typically relative paths starting with '.'
 fn is_local_import(import_path: &str) -> bool {
@@ -45,12 +101,16 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
     let mut containers = HashSet::new();
     let mut external_references = HashSet::new();
 
-    let mut stack = vec![root_node];
+    // Traverse the syntax tree, one cursor for the whole file
+    let kinds = &*KINDS;
+    let mut cursor = root_node.walk();
 
-    while let Some(node) = stack.pop() {
-        match node.kind() {
+    loop {
+        let node = cursor.node();
+
+        match node.kind_id() {
             // `import ... from '...';`, `export ... from '...';`
-            "import_statement" | "export_statement" => {
+            id if id == kinds.import_statement || id == kinds.export_statement => {
                 if let Some(import_path) = extract_import_path(node, &code) {
                     let is_local = is_local_import(&import_path);
                     imports.insert(Import::new(import_path, is_local));
@@ -58,7 +118,7 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
             }
 
             // `function hello() {}` and `method_definition` both insert function names
-            "function_declaration" | "method_definition" => {
+            id if id == kinds.function_declaration || id == kinds.method_definition => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     functions.insert(get_text(name_node, &code));
                 }
@@ -66,9 +126,9 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
 
             // `const myFunc = () => {}`, `let myVar = function() {}`,
             // `var legacyFunc = () => {}`
-            "lexical_declaration" | "variable_declaration" => {
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
+            id if id == kinds.lexical_declaration || id == kinds.variable_declaration => {
+                let mut declarator_cursor = node.walk();
+                for child in node.children(&mut declarator_cursor) {
                     if child.kind() != "variable_declarator" {
                         continue;
                     }
@@ -83,44 +143,36 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
             }
 
             // `class C {}`, `interface I {}`, `enum E {}`, `type T = ...`
-            "class_declaration"
-            | "interface_declaration"
-            | "enum_declaration"
-            | "type_alias_declaration" => {
+            id if kinds.is_declaration_kind(id) => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     containers.insert(get_text(name_node, &code));
                 }
             }
 
             // `obj.prop`, `this.field`, etc.
-            "member_expression" => {
+            id if id == kinds.member_expression => {
                 external_references.insert(get_text(node, &code));
             }
 
             // `foo()`, `obj.method()` - record the callee, not the whole call
-            "call_expression" => {
+            id if id == kinds.call_expression => {
                 if let Some(function_node) = node.child_by_field_name("function") {
                     external_references.insert(get_text(function_node, &code));
                 }
             }
 
             // `new Foo()`, `new ns.Foo()`
-            "new_expression" => {
+            id if id == kinds.new_expression => {
                 if let Some(constructor_node) = node.child_by_field_name("constructor") {
                     external_references.insert(get_text(constructor_node, &code));
                 }
             }
 
             // `x: Foo`, `x: ns.Foo` - type references, but not the declaration's own name
-            "type_identifier" | "nested_type_identifier" => {
+            id if id == kinds.type_identifier || id == kinds.nested_type_identifier => {
                 let is_declaration_name = node.parent().is_some_and(|parent| {
-                    matches!(
-                        parent.kind(),
-                        "class_declaration"
-                            | "interface_declaration"
-                            | "enum_declaration"
-                            | "type_alias_declaration"
-                    ) && parent.child_by_field_name("name") == Some(node)
+                    kinds.is_declaration_kind(parent.kind_id())
+                        && parent.child_by_field_name("name") == Some(node)
                 });
                 if !is_declaration_name {
                     external_references.insert(get_text(node, &code));
@@ -130,9 +182,8 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
             _ => {}
         }
 
-        let mut child_cursor = node.walk();
-        for child in node.children(&mut child_cursor) {
-            stack.push(child);
+        if !advance(&mut cursor) {
+            break;
         }
     }
 
@@ -160,6 +211,30 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
+    }
+
+    #[test]
+    fn every_dispatched_node_kind_resolves_to_an_id() {
+        // an unknown kind would resolve to 0 and silently collide with the others
+        for id in [
+            KINDS.import_statement,
+            KINDS.export_statement,
+            KINDS.function_declaration,
+            KINDS.method_definition,
+            KINDS.lexical_declaration,
+            KINDS.variable_declaration,
+            KINDS.class_declaration,
+            KINDS.interface_declaration,
+            KINDS.enum_declaration,
+            KINDS.type_alias_declaration,
+            KINDS.member_expression,
+            KINDS.call_expression,
+            KINDS.new_expression,
+            KINDS.type_identifier,
+            KINDS.nested_type_identifier,
+        ] {
+            assert_ne!(id, 0);
+        }
     }
 
     #[test]
