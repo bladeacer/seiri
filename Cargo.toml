@@ -56,6 +56,17 @@ tree-sitter-typescript = "0.23.2"
 [dev-dependencies]
 tempfile = "3.27.0"
 
+# The lib and bin harnesses would otherwise run first and reject the `parsing`
+# bench's flags (e.g. `--rust <path>`), so keep `cargo bench` pointed at the
+# single benchmark target below.
+[lib]
+bench = false
+
+[[bin]]
+name = "seiri-cli"
+path = "src/main.rs"
+bench = false
+
 # Sequential-vs-parallel parsing comparison per supported language.
 [[bench]]
 harness = false
