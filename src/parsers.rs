@@ -118,18 +118,6 @@ fn split_results(results: Vec<(PathBuf, Option<FileNode>)>) -> ParseOutcome {
     ParseOutcome { nodes, failed }
 }
 
-/// Parses every detected file one at a time.
-///
-/// This is the reference implementation that [`parse_all_parallel`] is checked against.
-pub fn parse_all_sequential(language_files: &HashMap<PathBuf, Language>) -> ParseOutcome {
-    split_results(
-        language_files
-            .iter()
-            .map(|(path, &language)| (path.clone(), parse_file(path, language)))
-            .collect(),
-    )
-}
-
 /// Parses every detected file across rayon's thread pool.
 ///
 /// `on_file_parsed` runs once for every file that parsed, and never for one that failed.
@@ -270,24 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_all_sequential_reports_files_it_cannot_read() {
-        let dir = TempDir::new().unwrap();
-        let good = dir.path().join("good.rs");
-        fs::write(&good, "pub fn good() {}\n").unwrap();
-        let bad = dir.path().join("bad.rs");
-        write_unreadable_file(&bad);
-
-        let language_files = HashMap::from([
-            (good.clone(), Language::Rust),
-            (bad.clone(), Language::Rust),
-        ]);
-        let outcome = parse_all_sequential(&language_files);
-
-        assert!(outcome.nodes().contains_key(&good));
-        assert_eq!(outcome.failed(), [bad]);
-    }
-
-    #[test]
     fn parse_all_parallel_reports_files_it_cannot_read() {
         let dir = TempDir::new().unwrap();
         let good = dir.path().join("good.py");
@@ -321,16 +291,16 @@ mod tests {
         assert_eq!(outcome.nodes().len(), language_files.len());
     }
 
-    /// Asserts both maps contain the same files with identical parse results.
-    fn assert_equivalent(
-        sequential: &HashMap<PathBuf, FileNode>,
-        parallel: &HashMap<PathBuf, FileNode>,
+    /// Asserts both parse maps contain the same files with identical results.
+    fn assert_same_parse(
+        expected: &HashMap<PathBuf, FileNode>,
+        actual: &HashMap<PathBuf, FileNode>,
     ) {
-        assert_eq!(sequential.len(), parallel.len());
-        for (path, expected) in sequential {
-            let actual = parallel
+        assert_eq!(expected.len(), actual.len());
+        for (path, expected) in expected {
+            let actual = actual
                 .get(path)
-                .unwrap_or_else(|| panic!("parallel parse dropped {}", path.display()));
+                .unwrap_or_else(|| panic!("parse dropped {}", path.display()));
             assert_eq!(expected.loc(), actual.loc(), "{}: LOC", path.display());
             assert_eq!(
                 expected.language(),
@@ -366,15 +336,15 @@ mod tests {
     }
 
     #[test]
-    fn parallel_parse_matches_sequential_parse_across_languages() {
+    fn parallel_parse_is_deterministic_across_runs() {
         let dir = TempDir::new().unwrap();
         let language_files = write_project(dir.path());
 
-        let sequential = parse_all_sequential(&language_files);
-        let parallel = parse_all_parallel(&language_files, || {});
+        let first = parse_all_parallel(&language_files, || {});
+        let second = parse_all_parallel(&language_files, || {});
 
-        assert_eq!(sequential.nodes().len(), language_files.len());
-        assert_equivalent(sequential.nodes(), parallel.nodes());
+        assert_eq!(first.nodes().len(), language_files.len());
+        assert_same_parse(first.nodes(), second.nodes());
     }
 
     #[test]
@@ -392,10 +362,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_all_sequential_and_parallel_handle_empty_input() {
+    fn parse_all_parallel_handles_empty_input() {
         let no_files = HashMap::new();
 
-        assert!(parse_all_sequential(&no_files).nodes().is_empty());
         assert!(parse_all_parallel(&no_files, || {}).nodes().is_empty());
     }
 

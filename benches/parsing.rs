@@ -1,11 +1,11 @@
-//! Compares sequential and parallel file parsing for every supported language,
-//! so the impact of parallelising the parse stage can be measured on real code.
+//! Measures parallel file parsing for every supported language, so the speed of
+//! the parse stage can be tracked on real code.
 //!
 //! ```sh
 //! # Synthetic corpora, one per language (runs anywhere)
 //! cargo bench
 //!
-//! # Real checkouts, one per language: the actual impact numbers
+//! # Real checkouts, one per language: the numbers that matter
 //! cargo bench -- --rust ~/src/serde --python ~/src/django \
 //!                --typescript ~/src/vscode --cpp ~/src/llvm-project
 //!
@@ -13,18 +13,17 @@
 //! cargo bench -- --files 2000 --iters 9
 //! ```
 //!
-//! Both modes parse the same files twice — once through [`parse_all_sequential`]
-//! and once through [`parse_all_parallel`] — and report the median wall-clock
-//! time of each alongside the speedup. The two runs are also checked for
-//! agreement, so a speedup is never reported for a parse that produced
-//! different output.
-//!
-//! Each row reports both the files it found and the files it parsed, and any
+//! Each row reports the files it found, the files it parsed, their total lines
+//! of code, and the median wall-clock time of a [`parse_all_parallel`] pass. Any
 //! file that could not be read or parsed is listed on stderr.
+//!
+//! With `--budget-ms-per-kloc`, a language whose median exceeds that many
+//! milliseconds per 1000 lines of code prints a GitHub warning annotation; a
+//! slow run is never reported as a failure.
 
-use seiri_cli::core::defs::{FileNode, Language};
+use seiri_cli::core::defs::Language;
 use seiri_cli::discovery::{detect_project_languages, walk_directory};
-use seiri_cli::parsers::{parse_all_parallel, parse_all_sequential};
+use seiri_cli::parsers::parse_all_parallel;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -44,10 +43,13 @@ const REPORTED_FAILURES: usize = 5;
 struct Config {
     /// How many files to generate per language in the synthetic corpora.
     files: usize,
-    /// Timed samples per mode; the median is reported.
+    /// Timed samples per language; the median is reported.
     iterations: usize,
     /// Real checkouts to measure instead of a synthetic corpus, per language.
     real_paths: HashMap<Language, PathBuf>,
+    /// Per-language time budget in milliseconds per 1000 lines of code;
+    /// exceeding it warns but never fails.
+    budget_ms_per_kloc: Option<f64>,
 }
 
 impl Default for Config {
@@ -56,6 +58,7 @@ impl Default for Config {
             files: 500,
             iterations: 5,
             real_paths: HashMap::new(),
+            budget_ms_per_kloc: None,
         }
     }
 }
@@ -77,13 +80,16 @@ fn main() {
     };
 
     println!(
-        "sequential vs parallel parsing ({} rayon threads)",
+        "parallel parsing ({} rayon threads)",
         rayon::current_num_threads()
     );
-    println!("each mode timed {}x, median reported\n", config.iterations);
     println!(
-        "{:<11} {:<44} {:>7} {:>7} {:>12} {:>12} {:>9}",
-        "language", "source", "files", "parsed", "sequential", "parallel", "speedup"
+        "each language timed {}x, median reported\n",
+        config.iterations
+    );
+    println!(
+        "{:<11} {:<44} {:>7} {:>7} {:>10} {:>12}",
+        "language", "source", "files", "parsed", "sloc", "median"
     );
 
     for language in LANGUAGES {
@@ -104,35 +110,30 @@ fn main() {
         };
 
         let file_count = corpus.files.len();
-
-        // Never report a speedup for a parse that changed the output.
-        let sequential_files = parse_all_sequential(&corpus.files);
-        let parallel_files = parse_all_parallel(&corpus.files, || {});
-        if !same_files(sequential_files.nodes(), parallel_files.nodes()) {
-            eprintln!(
-                "error: parallel parsing disagreed with sequential parsing for {}",
-                language.to_string()
-            );
-            std::process::exit(1);
-        }
-
-        let sequential = median_time(config.iterations, || parse_all_sequential(&corpus.files));
-        let parallel = median_time(config.iterations, || {
+        let outcome = parse_all_parallel(&corpus.files, || {});
+        let median = median_time(config.iterations, || {
             parse_all_parallel(&corpus.files, || {})
         });
+        let total_loc = outcome.nodes().values().map(|node| node.loc() as u64).sum();
 
         println!(
-            "{:<11} {:<44} {:>7} {:>7} {:>12} {:>12} {:>8}",
+            "{:<11} {:<44} {:>7} {:>7} {:>10} {:>12}",
             language.to_string(),
             corpus.label,
             file_count,
-            sequential_files.nodes().len(),
-            format_duration(sequential),
-            format_duration(parallel),
-            format_speedup(sequential, parallel),
+            outcome.nodes().len(),
+            total_loc,
+            format_duration(median),
         );
 
-        report_failures(language, sequential_files.failed(), file_count);
+        report_failures(language, outcome.failed(), file_count);
+        warn_if_over_budget(
+            language,
+            &corpus.label,
+            median,
+            total_loc,
+            config.budget_ms_per_kloc,
+        );
     }
 }
 
@@ -146,7 +147,9 @@ options:
   --typescript <path>  measure a real TypeScript checkout
   --cpp <path>         measure a real C++ checkout
   --files <n>          files to generate per language (default 500)
-  --iters <n>          timed samples per mode (default 5)
+  --iters <n>          timed samples per language (default 5)
+  --budget-ms-per-kloc <n>
+                       warn above n milliseconds per 1000 lines of code
   -h, --help           print this help"
         .to_string()
 }
@@ -187,6 +190,12 @@ fn parse_args() -> Result<Config, String> {
                     .ok_or_else(|| "`--iters` needs a value".to_string())?;
                 config.iterations = positive(value, "--iters")?;
             }
+            "--budget-ms-per-kloc" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "`--budget-ms-per-kloc` needs a value".to_string())?;
+                config.budget_ms_per_kloc = Some(positive_f64(value, "--budget-ms-per-kloc")?);
+            }
             other => return Err(format!("unrecognized argument `{other}`")),
         }
     }
@@ -206,6 +215,13 @@ fn positive(value: String, flag: &str) -> Result<usize, String> {
     match value.parse::<usize>() {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("`{flag}` needs a positive integer, got `{value}`")),
+    }
+}
+
+fn positive_f64(value: String, flag: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(n),
+        _ => Err(format!("`{flag}` needs a positive number, got `{value}`")),
     }
 }
 
@@ -359,22 +375,33 @@ fn report_failures(language: Language, failed: &[PathBuf], discovered: usize) {
     }
 }
 
-/// Checks both runs found the same files.
-fn same_files(
-    sequential: &HashMap<PathBuf, FileNode>,
-    parallel: &HashMap<PathBuf, FileNode>,
-) -> bool {
-    sequential.len() == parallel.len() && sequential.keys().all(|path| parallel.contains_key(path))
+/// Emits a GitHub warning annotation when a language parses slower than its
+/// per-SLOC budget. Scaling by lines of code keeps the budget meaningful across
+/// corpora that differ wildly in size. A budget is advisory: the run still exits
+/// successfully.
+fn warn_if_over_budget(
+    language: Language,
+    source: &str,
+    median: Duration,
+    total_loc: u64,
+    budget_ms_per_kloc: Option<f64>,
+) {
+    let Some(budget) = budget_ms_per_kloc else {
+        return;
+    };
+    if total_loc == 0 {
+        return;
+    }
+
+    let ms_per_kloc = median.as_secs_f64() * 1_000.0 / (total_loc as f64 / 1_000.0);
+    if ms_per_kloc > budget {
+        println!(
+            "::warning title=Parsing over budget::{} parsed {source} at {ms_per_kloc:.2} ms/kloc, over the {budget} ms/kloc budget ({total_loc} SLOC)",
+            language.to_string(),
+        );
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
     format!("{:.2} ms", duration.as_secs_f64() * 1_000.0)
-}
-
-fn format_speedup(sequential: Duration, parallel: Duration) -> String {
-    let parallel_secs = parallel.as_secs_f64();
-    if parallel_secs == 0.0 {
-        return "n/a".to_string();
-    }
-    format!("{:.2}x", sequential.as_secs_f64() / parallel_secs)
 }

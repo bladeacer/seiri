@@ -67,7 +67,7 @@ name = "seiri-cli"
 path = "src/main.rs"
 bench = false
 
-# Sequential-vs-parallel parsing comparison per supported language.
+# Parallel parsing benchmark per supported language.
 [[bench]]
 harness = false
 name = "parsing"
