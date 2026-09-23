@@ -211,11 +211,11 @@ mod tests {
 
         // skipping children of the root leaves the whole tree unvisited
         let mut cursor = root.walk();
-        let mut visited = vec![cursor.node().kind()];
+        let mut visited = vec![cursor.node().kind_id()];
         while skip_children(&mut cursor) {
-            visited.push(cursor.node().kind());
+            visited.push(cursor.node().kind_id());
         }
-        assert_eq!(visited, vec![root.kind()]);
+        assert_eq!(visited, vec![root.kind_id()]);
     }
 
     #[test]

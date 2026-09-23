@@ -61,6 +61,11 @@ impl SugiyamaLayout {
     }
 
     /// Create a directed acyclic graph by removing a minimal set of edges.
+    ///
+    /// Uses an iterative DFS (explicit stack) rather than recursion so this
+    /// can't stack-overflow on large/deep graphs, and shares a single
+    /// `visited` set across all start nodes so each node is only traversed
+    /// from once instead of restarting a fresh traversal per start node.
     fn make_dag(&self, graph: &Graph<(), ()>) -> Graph<(), ()> {
         let mut dag = graph.clone();
         let mut visited = HashSet::new();
@@ -109,7 +114,10 @@ impl SugiyamaLayout {
         dag
     }
 
-    /// Assign vertices to layers using the longest-path algorithm.
+    /// Assign vertices to layers using the longest-path algorithm: each
+    /// node's layer is the maximum of `predecessor_layer + 1` over all of
+    /// its incoming edges, computed via a single pass over a topological
+    /// order of the (already acyclic) graph.
     fn assign_layers(&self, dag: &Graph<(), ()>) -> Vec<Vec<LayeredNode>> {
         let mut layers = Vec::new();
         let mut node_layers = HashMap::new();
@@ -411,8 +419,14 @@ mod tests {
         );
     }
 
-    /// Regression test for issue #154: `assign_layers` must produce
-    /// deterministic layer assignment regardless of HashMap iteration order.
+    /// Regression test for issue #154: `assign_layers` used to push nodes
+    /// into each layer by iterating a `HashMap<NodeIndex, usize>` directly,
+    /// so same-degree nodes (which the subsequent stable sort leaves in
+    /// whatever order they were pushed) ended up in HashMap iteration order
+    /// -- different on every call, since each `HashMap::new()` gets a fresh
+    /// random hasher seed. Same-degree siblings must now come out in a
+    /// consistent order (ascending `NodeIndex`, i.e. creation order) on every
+    /// call.
     #[test]
     fn assign_layers_orders_same_degree_nodes_deterministically() {
         let layout = SugiyamaLayout::new(SugiyamaConfig::default());
@@ -464,7 +478,10 @@ mod tests {
         }
     }
 
-    /// `make_dag`'s cycle-breaking DFS must be iterative.
+    /// `make_dag`'s cycle-breaking DFS must be iterative: a long chain
+    /// closed into one big cycle would blow the stack with a naive
+    /// recursive DFS, and restarting a fresh traversal per start node would
+    /// make this quadratic. Neither should happen here.
     #[test]
     fn make_dag_breaks_large_cycle_without_stack_overflow() {
         let layout = SugiyamaLayout::new(SugiyamaConfig::default());

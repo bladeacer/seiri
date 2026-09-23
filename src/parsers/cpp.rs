@@ -19,6 +19,24 @@ struct CppKinds {
     qualified_identifier: u16,
     call_expression: u16,
     type_identifier: u16,
+    string_literal: u16,
+    system_lib_string: u16,
+    identifier: u16,
+    preproc_ifdef: u16,
+    preproc_if: u16,
+    // declarator shapes extract_declarator_name unwraps
+    field_identifier: u16,
+    destructor_name: u16,
+    operator_name: u16,
+    operator_cast: u16,
+    function_declarator: u16,
+    template_function: u16,
+    pointer_declarator: u16,
+    reference_declarator: u16,
+    array_declarator: u16,
+    parenthesized_declarator: u16,
+    attributed_declarator: u16,
+    structured_binding_declarator: u16,
 }
 
 impl CppKinds {
@@ -35,6 +53,23 @@ impl CppKinds {
             qualified_identifier: id("qualified_identifier"),
             call_expression: id("call_expression"),
             type_identifier: id("type_identifier"),
+            string_literal: id("string_literal"),
+            system_lib_string: id("system_lib_string"),
+            identifier: id("identifier"),
+            preproc_ifdef: id("preproc_ifdef"),
+            preproc_if: id("preproc_if"),
+            field_identifier: id("field_identifier"),
+            destructor_name: id("destructor_name"),
+            operator_name: id("operator_name"),
+            operator_cast: id("operator_cast"),
+            function_declarator: id("function_declarator"),
+            template_function: id("template_function"),
+            pointer_declarator: id("pointer_declarator"),
+            reference_declarator: id("reference_declarator"),
+            array_declarator: id("array_declarator"),
+            parenthesized_declarator: id("parenthesized_declarator"),
+            attributed_declarator: id("attributed_declarator"),
+            structured_binding_declarator: id("structured_binding_declarator"),
         }
     }
 
@@ -127,59 +162,71 @@ fn is_system_include(include_path: &str) -> bool {
 /// terminal name itself may be a plain identifier, a qualified name
 /// (`ns::f`), a destructor (`~Foo`), an operator overload (`operator==`),
 /// or a conversion operator (`operator bool`).
-fn extract_declarator_name(node: tree_sitter::Node, code: &str) -> Option<String> {
-    match node.kind() {
-        "identifier"
-        | "field_identifier"
-        | "qualified_identifier"
-        | "destructor_name"
-        | "operator_name" => Some(get_text(node, code)),
-        "operator_cast" => {
+fn extract_declarator_name(
+    node: tree_sitter::Node,
+    code: &str,
+    kinds: &CppKinds,
+) -> Option<String> {
+    match node.kind_id() {
+        id if id == kinds.identifier
+            || id == kinds.field_identifier
+            || id == kinds.qualified_identifier
+            || id == kinds.destructor_name
+            || id == kinds.operator_name =>
+        {
+            Some(get_text(node, code))
+        }
+        id if id == kinds.operator_cast => {
             let type_node = node.child_by_field_name("type")?;
             Some(format!("operator {}", get_text(type_node, code)))
         }
-        "function_declarator" => {
-            extract_declarator_name(node.child_by_field_name("declarator")?, code)
+        id if id == kinds.function_declarator => {
+            extract_declarator_name(node.child_by_field_name("declarator")?, code, kinds)
         }
-        "template_function" => extract_declarator_name(node.child_by_field_name("name")?, code),
+        id if id == kinds.template_function => {
+            extract_declarator_name(node.child_by_field_name("name")?, code, kinds)
+        }
         // these wrapping declarators don't expose
         // their inner declarator through a named field, so search their
         // named children for the first one that resolves to a name
-        "pointer_declarator"
-        | "reference_declarator"
-        | "array_declarator"
-        | "parenthesized_declarator"
-        | "attributed_declarator"
-        | "structured_binding_declarator" => {
+        id if id == kinds.pointer_declarator
+            || id == kinds.reference_declarator
+            || id == kinds.array_declarator
+            || id == kinds.parenthesized_declarator
+            || id == kinds.attributed_declarator
+            || id == kinds.structured_binding_declarator =>
+        {
             let mut cursor = node.walk();
             node.named_children(&mut cursor)
-                .find_map(|child| extract_declarator_name(child, code))
+                .find_map(|child| extract_declarator_name(child, code, kinds))
         }
         _ => None,
     }
 }
 
 /// Extract include path from #include directive.
-fn extract_include_path(node: tree_sitter::Node, code: &str) -> Option<(String, bool)> {
+fn extract_include_path(
+    node: tree_sitter::Node,
+    code: &str,
+    kinds: &CppKinds,
+) -> Option<(String, bool)> {
     // For #include directives, the structure is:
     // preproc_include -> string_literal or system_lib_string
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
-        match child.kind() {
-            "string_literal" => {
-                // Quoted include: "file.h" -> local
-                let text = get_text(child, code);
-                let path = text.trim_matches('"').trim_matches('\'').to_string();
-                return Some((path, true));
-            }
-            "system_lib_string" => {
-                // System include: <vector> -> not local
-                let text = get_text(child, code);
-                let path = text.trim_matches('<').trim_matches('>').to_string();
-                return Some((path, false));
-            }
-            _ => {}
+        let id = child.kind_id();
+        if id == kinds.string_literal {
+            // Quoted include: "file.h" -> local
+            let text = get_text(child, code);
+            let path = text.trim_matches('"').trim_matches('\'').to_string();
+            return Some((path, true));
+        }
+        if id == kinds.system_lib_string {
+            // System include: <vector> -> not local
+            let text = get_text(child, code);
+            let path = text.trim_matches('<').trim_matches('>').to_string();
+            return Some((path, false));
         }
     }
 
@@ -192,7 +239,10 @@ fn extract_include_path(node: tree_sitter::Node, code: &str) -> Option<(String, 
 fn is_in_conditional_block(node: tree_sitter::Node) -> bool {
     let mut current = Some(node);
     while let Some(n) = current {
-        if matches!(n.kind(), "preproc_ifdef" | "preproc_ifndef" | "preproc_if") {
+        let id = n.kind_id();
+        // tree-sitter-cpp has no `preproc_ifndef` node: `#ifndef` yields a
+        // `preproc_ifdef` whose `#ifndef` is just an anonymous token
+        if id == KINDS.preproc_ifdef || id == KINDS.preproc_if {
             return true;
         }
         current = n.parent();
@@ -205,7 +255,7 @@ fn is_in_conditional_block(node: tree_sitter::Node) -> bool {
 fn extract_conditional_condition(node: tree_sitter::Node, code: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" {
+        if child.kind_id() == KINDS.identifier {
             return Some(get_text(child, code));
         }
     }
@@ -298,14 +348,14 @@ pub fn parse_cpp_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
         match node.kind_id() {
             id if id == kinds.preproc_include => {
                 // Extract include path
-                if let Some((include_path, is_local)) = extract_include_path(node, &code) {
+                if let Some((include_path, is_local)) = extract_include_path(node, &code, kinds) {
                     imports.insert(Import::new(include_path, is_local));
                 }
             }
             id if id == kinds.function_definition => {
                 // Extract function name
                 if let Some(declarator_node) = node.child_by_field_name("declarator")
-                    && let Some(name) = extract_declarator_name(declarator_node, &code)
+                    && let Some(name) = extract_declarator_name(declarator_node, &code, kinds)
                 {
                     functions.insert(name);
                 }
@@ -411,6 +461,23 @@ mod tests {
             KINDS.qualified_identifier,
             KINDS.call_expression,
             KINDS.type_identifier,
+            KINDS.string_literal,
+            KINDS.system_lib_string,
+            KINDS.identifier,
+            KINDS.preproc_ifdef,
+            KINDS.preproc_if,
+            KINDS.field_identifier,
+            KINDS.destructor_name,
+            KINDS.operator_name,
+            KINDS.operator_cast,
+            KINDS.function_declarator,
+            KINDS.template_function,
+            KINDS.pointer_declarator,
+            KINDS.reference_declarator,
+            KINDS.array_declarator,
+            KINDS.parenthesized_declarator,
+            KINDS.attributed_declarator,
+            KINDS.structured_binding_declarator,
         ] {
             assert_ne!(id, 0);
         }

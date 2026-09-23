@@ -110,7 +110,13 @@ mod tests {
     use std::fs::{self, File};
     use tempfile::TempDir;
 
-    /// Helper to create a mock Python project.
+    /// Helper to create a mock Python project:
+    /// /
+    /// ├── main.py
+    /// ├── utils.py
+    /// └── api/
+    ///     ├── __init__.py
+    ///     └── routes.py
     fn setup_test_project(dir: &TempDir) {
         let root = dir.path();
         fs::create_dir(root.join("api")).unwrap();

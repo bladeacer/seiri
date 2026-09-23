@@ -91,7 +91,13 @@ mod tests {
     use std::fs::{self, File};
     use tempfile::TempDir;
 
-    /// Creates a mock TS project.
+    /// Creates a mock TS project:
+    /// /
+    /// ├── main.ts
+    /// ├── components/
+    /// │   ├── button.ts
+    /// │   └── index.ts // we do not currently support TSX
+    /// └── utils.ts
     fn setup_test_project(dir: &TempDir) {
         let root = dir.path();
         fs::create_dir_all(root.join("components")).unwrap();

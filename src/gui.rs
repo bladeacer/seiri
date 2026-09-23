@@ -13,7 +13,9 @@ mod culling;
 
 use culling::segment_intersects_rect;
 
-/// Computes where a directed edge from `from` to `to` should terminate at the target node boundary.
+/// Computes the point where a directed edge from `from` to `to` should terminate so it
+/// touches the boundary of the target node (a circle of `radius` centered at
+/// `to`) instead of piercing through to its center.
 fn edge_tip_at_node_boundary(from: Pos2, to: Pos2, radius: f32) -> Pos2 {
     let delta = to - from;
     if delta.length_sq() <= f32::EPSILON {
@@ -22,7 +24,10 @@ fn edge_tip_at_node_boundary(from: Pos2, to: Pos2, radius: f32) -> Pos2 {
     to - delta.normalized() * radius
 }
 
-/// Build a petgraph mirroring the dependency edges between `graph_nodes`.
+/// Build a petgraph mirroring the real dependency edges between `graph_nodes`,
+/// resolving each edge's file path to its target's actual index rather than
+/// assuming an edge's position within its source node's edge list matches the
+/// target's index in `graph_nodes`.
 fn build_dependency_graph(graph_nodes: &[GraphNode]) -> Graph<(), ()> {
     let mut graph = Graph::new();
     let node_indices: Vec<NodeIndex> = graph_nodes.iter().map(|_| graph.add_node(())).collect();
@@ -215,7 +220,9 @@ impl SeiriGraph {
         }
     }
 
-    /// Screen-space render radius of node `index`.
+    /// Screen-space render radius of node `index`, accounting for LOC/betweenness sizing and
+    /// the current camera zoom. Shared by edge anchoring and node drawing so both agree on
+    /// where a node's boundary actually is.
     fn node_screen_radius(&self, index: usize) -> f32 {
         let betweenness_score = self
             .graph_analysis
@@ -651,7 +658,8 @@ impl SeiriGraph {
         }
     }
 
-    /// Renders the controls panel.
+    /// Renders the controls panel on the top of the window.
+    /// Shows things like layout types, show/hide options, and zoom level.
     fn render_controls_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.horizontal(|ui| {

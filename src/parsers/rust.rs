@@ -13,6 +13,14 @@ struct RustKinds {
     identifier: u16,
     type_identifier: u16,
     semicolon: u16,
+    crate_kw: u16,
+    self_kw: u16,
+    super_kw: u16,
+    metavariable: u16,
+    use_wildcard: u16,
+    use_as_clause: u16,
+    use_list: u16,
+    scoped_use_list: u16,
     use_declaration: u16,
     mod_item: u16,
     function_item: u16,
@@ -32,6 +40,14 @@ impl RustKinds {
             identifier: id("identifier"),
             type_identifier: id("type_identifier"),
             semicolon: language.id_for_node_kind(";", false),
+            crate_kw: id("crate"),
+            self_kw: id("self"),
+            super_kw: id("super"),
+            metavariable: id("metavariable"),
+            use_wildcard: id("use_wildcard"),
+            use_as_clause: id("use_as_clause"),
+            use_list: id("use_list"),
+            scoped_use_list: id("scoped_use_list"),
             use_declaration: id("use_declaration"),
             mod_item: id("mod_item"),
             function_item: id("function_item"),
@@ -66,7 +82,7 @@ fn is_local_import(import_path: &str, file_path: &Path) -> bool {
 fn extract_use_paths(node: tree_sitter::Node, code: &str) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(argument) = node.child_by_field_name("argument") {
-        collect_use_paths(argument, code, "", &mut paths);
+        collect_use_paths(argument, code, &KINDS, "", &mut paths);
     }
     paths
 }
@@ -81,56 +97,72 @@ fn use_wildcard_prefix(node: tree_sitter::Node, code: &str) -> Option<String> {
 
 /// Recursively collect import paths from a use-clause argument node, accumulating `prefix`
 /// as scopes are entered.
-fn collect_use_paths(node: tree_sitter::Node, code: &str, prefix: &str, paths: &mut Vec<String>) {
-    match node.kind() {
-        "identifier" | "crate" | "metavariable" | "scoped_identifier" => {
-            paths.push(format!("{prefix}{}", get_text(node, code)));
+fn collect_use_paths(
+    node: tree_sitter::Node,
+    code: &str,
+    kinds: &RustKinds,
+    prefix: &str,
+    paths: &mut Vec<String>,
+) {
+    let id = node.kind_id();
+    if id == kinds.identifier
+        || id == kinds.crate_kw
+        || id == kinds.metavariable
+        || id == kinds.scoped_identifier
+    {
+        paths.push(format!("{prefix}{}", get_text(node, code)));
+        return;
+    }
+    if id == kinds.self_kw {
+        // `foo::{self, bar}` imports the module `foo` itself; a bare `use self;`
+        // refers to the current module.
+        if prefix.is_empty() {
+            paths.push("self".to_string());
+        } else {
+            paths.push(prefix.trim_end_matches("::").to_string());
         }
-        "self" => {
-            // `foo::{self, bar}` imports the module `foo` itself; a bare `use self;`
-            // refers to the current module.
-            if prefix.is_empty() {
-                paths.push("self".to_string());
-            } else {
-                paths.push(prefix.trim_end_matches("::").to_string());
-            }
-        }
-        "super" => {
-            paths.push(format!("{prefix}super"));
-        }
-        "use_wildcard" => match use_wildcard_prefix(node, code) {
+        return;
+    }
+    if id == kinds.super_kw {
+        paths.push(format!("{prefix}super"));
+        return;
+    }
+    if id == kinds.use_wildcard {
+        match use_wildcard_prefix(node, code) {
             Some(inner) => paths.push(format!("{prefix}{inner}::*")),
             None => paths.push(format!("{prefix}*")),
-        },
-        "use_as_clause" => {
-            // Handle `foo as bar` - we want the original name (foo)
-            if let Some(path_node) = node.child_by_field_name("path") {
-                collect_use_paths(path_node, code, prefix, paths);
+        }
+        return;
+    }
+    if id == kinds.use_as_clause {
+        // Handle `foo as bar` - we want the original name (foo)
+        if let Some(path_node) = node.child_by_field_name("path") {
+            collect_use_paths(path_node, code, kinds, prefix, paths);
+        }
+        return;
+    }
+    if id == kinds.use_list {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                collect_use_paths(child, code, kinds, prefix, paths);
             }
         }
-        "use_list" => {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.is_named() {
-                    collect_use_paths(child, code, prefix, paths);
-                }
-            }
+        return;
+    }
+    if id == kinds.scoped_use_list {
+        let path_text = node
+            .child_by_field_name("path")
+            .map(|p| get_text(p, code))
+            .unwrap_or_default();
+        let new_prefix = if path_text.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix}{path_text}::")
+        };
+        if let Some(list_node) = node.child_by_field_name("list") {
+            collect_use_paths(list_node, code, kinds, &new_prefix, paths);
         }
-        "scoped_use_list" => {
-            let path_text = node
-                .child_by_field_name("path")
-                .map(|p| get_text(p, code))
-                .unwrap_or_default();
-            let new_prefix = if path_text.is_empty() {
-                prefix.to_string()
-            } else {
-                format!("{prefix}{path_text}::")
-            };
-            if let Some(list_node) = node.child_by_field_name("list") {
-                collect_use_paths(list_node, code, &new_prefix, paths);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -277,6 +309,14 @@ mod tests {
             KINDS.identifier,
             KINDS.type_identifier,
             KINDS.semicolon,
+            KINDS.crate_kw,
+            KINDS.self_kw,
+            KINDS.super_kw,
+            KINDS.metavariable,
+            KINDS.use_wildcard,
+            KINDS.use_as_clause,
+            KINDS.use_list,
+            KINDS.scoped_use_list,
             KINDS.use_declaration,
             KINDS.mod_item,
             KINDS.function_item,

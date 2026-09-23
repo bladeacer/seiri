@@ -18,6 +18,10 @@ struct PythonKinds {
     block: u16,
     attribute: u16,
     call: u16,
+    dotted_name: u16,
+    aliased_import: u16,
+    relative_import: u16,
+    import_prefix: u16,
 }
 
 impl PythonKinds {
@@ -33,6 +37,10 @@ impl PythonKinds {
             block: id("block"),
             attribute: id("attribute"),
             call: id("call"),
+            dotted_name: id("dotted_name"),
+            aliased_import: id("aliased_import"),
+            relative_import: id("relative_import"),
+            import_prefix: id("import_prefix"),
         }
     }
 }
@@ -68,37 +76,39 @@ fn is_local_import(import_path: &str, file_path: &Path) -> bool {
 /// Recursively extract the callee/attribute path of a `call` or `attribute` node, stripping
 /// any call-argument text so e.g. `foo(1)` and `obj.method(a, b)` normalize to `foo` and
 /// `obj.method` instead of one distinct "reference" per call site/argument list.
-fn callee_text(node: tree_sitter::Node, code: &str) -> String {
-    match node.kind() {
-        "call" => node
+fn callee_text(node: tree_sitter::Node, code: &str, kinds: &PythonKinds) -> String {
+    let id = node.kind_id();
+    if id == kinds.call {
+        return node
             .child_by_field_name("function")
-            .map(|function| callee_text(function, code))
-            .unwrap_or_default(),
-        "attribute" => {
-            let object = node
-                .child_by_field_name("object")
-                .map(|object| callee_text(object, code))
-                .unwrap_or_default();
-            let attribute = node
-                .child_by_field_name("attribute")
-                .map(|attribute| get_text(attribute, code))
-                .unwrap_or_default();
-            if object.is_empty() {
-                attribute
-            } else {
-                format!("{object}.{attribute}")
-            }
+            .map(|function| callee_text(function, code, kinds))
+            .unwrap_or_default();
+    }
+    if id == kinds.attribute {
+        let object = node
+            .child_by_field_name("object")
+            .map(|object| callee_text(object, code, kinds))
+            .unwrap_or_default();
+        let attribute = node
+            .child_by_field_name("attribute")
+            .map(|attribute| get_text(attribute, code))
+            .unwrap_or_default();
+        if object.is_empty() {
+            attribute
+        } else {
+            format!("{object}.{attribute}")
         }
-        _ => get_text(node, code),
+    } else {
+        get_text(node, code)
     }
 }
 
 /// Join the `identifier` children of a `dotted_name` node with `.`.
-fn dotted_name_text(node: tree_sitter::Node, code: &str) -> String {
+fn dotted_name_text(node: tree_sitter::Node, code: &str, kinds: &PythonKinds) -> String {
     let mut parts = Vec::new();
     let mut cursor = node.walk();
     for part in node.children(&mut cursor) {
-        if part.kind() == "identifier" {
+        if part.kind_id() == kinds.identifier {
             parts.push(get_text(part, code));
         }
     }
@@ -106,71 +116,46 @@ fn dotted_name_text(node: tree_sitter::Node, code: &str) -> String {
 }
 
 /// Extract import path from an import statement.
-fn extract_import_path(node: tree_sitter::Node, code: &str) -> Vec<String> {
+fn extract_import_path(node: tree_sitter::Node, code: &str, kinds: &PythonKinds) -> Vec<String> {
     let mut imports = Vec::new();
     let mut cursor = node.walk();
 
-    match node.kind() {
-        "import_statement" => {
+    match node.kind_id() {
+        id if id == kinds.import_statement => {
             // Handle "import x.y.z" and "import x.y.z as w"
             for child in node.children(&mut cursor) {
-                match child.kind() {
-                    "dotted_name" => {
-                        let mut path = Vec::new();
-                        let mut name_cursor = child.walk();
-                        for name_part in child.children(&mut name_cursor) {
-                            if name_part.kind() == "identifier" {
-                                path.push(get_text(name_part, code));
-                            }
-                        }
-                        if !path.is_empty() {
-                            imports.push(path.join("."));
-                        }
+                let child_id = child.kind_id();
+                if child_id == kinds.dotted_name {
+                    imports.push(dotted_name_text(child, code, kinds));
+                } else if child_id == kinds.aliased_import
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let path = dotted_name_text(name_node, code, kinds);
+                    if !path.is_empty() {
+                        imports.push(path);
                     }
-                    "aliased_import" => {
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            let mut path = Vec::new();
-                            let mut name_cursor = name_node.walk();
-                            for name_part in name_node.children(&mut name_cursor) {
-                                if name_part.kind() == "identifier" {
-                                    path.push(get_text(name_part, code));
-                                }
-                            }
-                            if !path.is_empty() {
-                                imports.push(path.join("."));
-                            }
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
-        "import_from_statement" => {
+        id if id == kinds.import_from_statement => {
             // handle "from x.y.z import a, b, c" and "from . import x"
             let mut dot_count = 0;
             let mut base_path = String::new();
 
             if let Some(module_name) = node.child_by_field_name("module_name") {
-                match module_name.kind() {
-                    "relative_import" => {
-                        let mut rel_cursor = module_name.walk();
-                        for child in module_name.children(&mut rel_cursor) {
-                            match child.kind() {
-                                "import_prefix" => {
-                                    dot_count =
-                                        get_text(child, code).chars().filter(|&c| c == '.').count();
-                                }
-                                "dotted_name" => {
-                                    base_path = dotted_name_text(child, code);
-                                }
-                                _ => {}
-                            }
+                let module_id = module_name.kind_id();
+                if module_id == kinds.relative_import {
+                    let mut rel_cursor = module_name.walk();
+                    for child in module_name.children(&mut rel_cursor) {
+                        let child_id = child.kind_id();
+                        if child_id == kinds.import_prefix {
+                            dot_count = get_text(child, code).chars().filter(|&c| c == '.').count();
+                        } else if child_id == kinds.dotted_name {
+                            base_path = dotted_name_text(child, code, kinds);
                         }
                     }
-                    "dotted_name" => {
-                        base_path = dotted_name_text(module_name, code);
-                    }
-                    _ => {}
+                } else if module_id == kinds.dotted_name {
+                    base_path = dotted_name_text(module_name, code, kinds);
                 }
             }
 
@@ -180,13 +165,16 @@ fn extract_import_path(node: tree_sitter::Node, code: &str) -> Vec<String> {
                 // that lives `dot_count` levels up from the current package
                 let mut name_cursor = node.walk();
                 for name_node in node.children_by_field_name("name", &mut name_cursor) {
-                    let name_text = match name_node.kind() {
-                        "dotted_name" => dotted_name_text(name_node, code),
-                        "aliased_import" => name_node
+                    let name_id = name_node.kind_id();
+                    let name_text = if name_id == kinds.dotted_name {
+                        dotted_name_text(name_node, code, kinds)
+                    } else if name_id == kinds.aliased_import {
+                        name_node
                             .child_by_field_name("name")
-                            .map(|n| dotted_name_text(n, code))
-                            .unwrap_or_default(),
-                        _ => String::new(),
+                            .map(|n| dotted_name_text(n, code, kinds))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
                     };
                     if !name_text.is_empty() {
                         imports.push(format!("{}{}", ".".repeat(dot_count), name_text));
@@ -228,7 +216,7 @@ pub fn parse_python_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
         match node.kind_id() {
             id if id == kinds.import_statement || id == kinds.import_from_statement => {
                 // Handle both "import foo" and "from foo import bar"
-                let import_paths = extract_import_path(node, &code);
+                let import_paths = extract_import_path(node, &code, kinds);
                 for import_path in import_paths {
                     let is_local = is_local_import(&import_path, path.as_ref());
                     imports.insert(Import::new(import_path, is_local));
@@ -265,7 +253,7 @@ pub fn parse_python_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
             id if id == kinds.attribute || id == kinds.call => {
                 // Collect external references from attribute access and function calls,
                 // normalized to the callee/attribute path with argument text stripped
-                let text = callee_text(node, &code);
+                let text = callee_text(node, &code, kinds);
                 if !text.is_empty() && !text.starts_with('_') {
                     // Only include public attributes/calls
                     external_references.insert(text);
@@ -316,6 +304,10 @@ mod tests {
             KINDS.block,
             KINDS.attribute,
             KINDS.call,
+            KINDS.dotted_name,
+            KINDS.aliased_import,
+            KINDS.relative_import,
+            KINDS.import_prefix,
         ] {
             assert_ne!(id, 0);
         }

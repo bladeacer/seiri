@@ -25,6 +25,10 @@ struct TypeScriptKinds {
     new_expression: u16,
     type_identifier: u16,
     nested_type_identifier: u16,
+    import_require_clause: u16,
+    variable_declarator: u16,
+    arrow_function: u16,
+    function_expression: u16,
 }
 
 impl TypeScriptKinds {
@@ -47,6 +51,10 @@ impl TypeScriptKinds {
             new_expression: id("new_expression"),
             type_identifier: id("type_identifier"),
             nested_type_identifier: id("nested_type_identifier"),
+            import_require_clause: id("import_require_clause"),
+            variable_declarator: id("variable_declarator"),
+            arrow_function: id("arrow_function"),
+            function_expression: id("function_expression"),
         }
     }
 
@@ -68,12 +76,16 @@ fn is_local_import(import_path: &str) -> bool {
 }
 
 /// Extracts the import path string from an import or export statement
-fn extract_import_path(node: tree_sitter::Node, code: &str) -> Option<String> {
+fn extract_import_path(
+    node: tree_sitter::Node,
+    code: &str,
+    kinds: &TypeScriptKinds,
+) -> Option<String> {
     let mut source_node = node.child_by_field_name("source");
     if source_node.is_none() {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if child.kind() == "import_require_clause" {
+            if child.kind_id() == kinds.import_require_clause {
                 source_node = child.child_by_field_name("source");
                 break;
             }
@@ -111,7 +123,7 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
         match node.kind_id() {
             // `import ... from '...';`, `export ... from '...';`
             id if id == kinds.import_statement || id == kinds.export_statement => {
-                if let Some(import_path) = extract_import_path(node, &code) {
+                if let Some(import_path) = extract_import_path(node, &code, kinds) {
                     let is_local = is_local_import(&import_path);
                     imports.insert(Import::new(import_path, is_local));
                 }
@@ -129,12 +141,16 @@ pub fn parse_typescript_file<P: AsRef<Path>>(path: P) -> Option<FileNode> {
             id if id == kinds.lexical_declaration || id == kinds.variable_declaration => {
                 let mut declarator_cursor = node.walk();
                 for child in node.children(&mut declarator_cursor) {
-                    if child.kind() != "variable_declarator" {
+                    if child.kind_id() != kinds.variable_declarator {
                         continue;
                     }
 
                     if let Some(value_node) = child.child_by_field_name("value")
-                        && matches!(value_node.kind(), "arrow_function" | "function_expression")
+                        && {
+                            let value_id = value_node.kind_id();
+                            value_id == kinds.arrow_function
+                                || value_id == kinds.function_expression
+                        }
                         && let Some(name_node) = child.child_by_field_name("name")
                     {
                         functions.insert(get_text(name_node, &code));
@@ -232,6 +248,10 @@ mod tests {
             KINDS.new_expression,
             KINDS.type_identifier,
             KINDS.nested_type_identifier,
+            KINDS.import_require_clause,
+            KINDS.variable_declarator,
+            KINDS.arrow_function,
+            KINDS.function_expression,
         ] {
             assert_ne!(id, 0);
         }

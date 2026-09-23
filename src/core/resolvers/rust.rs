@@ -252,7 +252,13 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    /// Creates a mock Rust project structure.
+    /// Creates a mock Rust project structure:
+    /// /
+    /// ├── lib.rs
+    /// ├── utils.rs
+    /// └── api/
+    ///     ├── mod.rs
+    ///     └── routes.rs
     fn setup_test_project(dir: &TempDir) {
         let root = dir.path();
         fs::create_dir_all(root.join("api")).unwrap();

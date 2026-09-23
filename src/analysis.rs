@@ -82,7 +82,10 @@ impl GraphAnalysis {
         }
     }
 
-    /// Calculate betweenness centrality for all nodes.
+    /// Calculate betweenness centrality for all nodes. A node with
+    /// higher betweenness centrality is more likely to be a chokepoint/common
+    /// dependency, indicating possible god objects or bloated files.
+    /// See: https://en.wikipedia.org/wiki/Betweenness_centrality
     fn calculate_betweenness_centrality(graph: &Graph<(), ()>) -> HashMap<NodeIndex, f64> {
         let mut centrality: HashMap<NodeIndex, f64> =
             graph.node_indices().map(|n| (n, 0.0)).collect();
@@ -104,7 +107,7 @@ impl GraphAnalysis {
         centrality
     }
 
-    /// Analyze the graph for SCCs and betweenness centrality.
+    /// Analyze the graph to find both SCCs and betweenness centrality.
     pub fn analyze_graph(graph: &Graph<(), ()>) -> Self {
         let mut analysis = Self {
             scc_sizes: Vec::new(),
@@ -281,8 +284,10 @@ mod tests {
     }
 
     /// The SCC computation must not use a naive recursive DFS: a long chain
-    /// closed into a cycle would blow the stack. Exercises `kosaraju_scc`
-    /// directly so the test doesn't also pay for betweenness centrality's cost.
+    /// closed into one big cycle would blow the stack with recursion depth
+    /// equal to the chain length. Exercises `kosaraju_scc` directly (rather
+    /// than through `analyze_graph`) so the test isn't also paying for
+    /// betweenness centrality's separate O(V*(V+E)) cost on a huge graph.
     #[test]
     fn kosaraju_scc_handles_large_cycle_without_stack_overflow() {
         let mut graph = Graph::<(), ()>::new();

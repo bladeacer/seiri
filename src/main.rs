@@ -304,7 +304,10 @@ fn run(args: Cli) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks whether `path` already exists, handling overwrite logic based on `force`.
+/// Checks whether `path` already exists and, if so, either rejects the export outright
+/// (when `force` is true, overwriting is allowed unconditionally) or asks the user to
+/// confirm the overwrite via `reader`. Returns an error if the user declines or `force`
+/// is not set and confirmation is not given.
 fn confirm_overwrite<R: BufRead>(path: &Path, force: bool, reader: &mut R) -> Result<(), String> {
     if force || !path.exists() {
         return Ok(());
@@ -558,7 +561,8 @@ mod tests {
         assert!(confirm_overwrite(&output_path, false, &mut reader).is_err());
     }
 
-    /// Verify C++ nodes work with layout algorithms.
+    /// Test T019: Verify C++ nodes work with layout algorithms
+    /// Creates a simple C++ project and tests both Sugiyama and Circular layouts
     #[test]
     fn test_cpp_layout_sugiyama_and_circular() {
         let temp_dir = TempDir::new().unwrap();
@@ -690,7 +694,8 @@ mod tests {
         }
     }
 
-    /// Verify C++ export to SVG, PNG, and JPEG.
+    /// Test T020: Verify C++ Export (SVG, PNG, and JPEG)
+    /// Tests that C++ graphs export correctly to SVG, PNG, and JPEG formats
     #[test]
     fn test_cpp_export_svg_and_png() {
         let temp_dir = TempDir::new().unwrap();

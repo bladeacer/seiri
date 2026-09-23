@@ -26,7 +26,9 @@ fn is_within_project(candidate: &Path, project_root: &Path) -> bool {
 
 /// Module resolution trait
 pub trait LanguageResolver {
-    /// Build module mapping for this language.
+    /// Build module mapping for this language. This will build a map of files
+    /// to "modules", or expressions that are importable (e.g., `use crate::core`
+    /// <-> `src/core.rs`)
     fn build_module_map(&mut self, files: &[PathBuf], project_root: &Path);
 
     /// Resolve an import path to a file path for this language.
@@ -172,7 +174,9 @@ mod tests {
         (path, node)
     }
 
-    /// Resolver stub whose `resolve_external_references` always points at a file not in `node_map`.
+    /// Resolver stub whose `resolve_external_references` always points at a
+    /// file that was never part of the scanned `node_map` (e.g. it was
+    /// gitignored, unsupported, or failed to parse).
     struct DanglingExternalRefResolver;
 
     impl LanguageResolver for DanglingExternalRefResolver {
@@ -194,7 +198,11 @@ mod tests {
         }
     }
 
-    /// Regression test for issue #153: `build_graph_edges` must filter dangling external-reference edges.
+    /// Regression test for issue #153: `build_graph_edges` used to push resolved
+    /// external-reference targets as edges without checking they exist in
+    /// `node_map`. The equivalent check exists for regular imports but was
+    /// missing for external references, allowing dangling edges to files
+    /// that were never scanned.
     #[test]
     fn build_graph_edges_filters_dangling_external_reference_edges() {
         let project_root = PathBuf::from("/project");
@@ -217,8 +225,12 @@ mod tests {
         );
     }
 
-    /// Regression test for issue #154: `build_graph_edges` must produce
-    /// deterministic node/edge order regardless of `node_map` insertion order.
+    /// Regression test for issue #154: `build_graph_edges` used to iterate the
+    /// `node_map: HashMap<PathBuf, FileNode>` directly, so the resulting node
+    /// and edge order depended on HashMap iteration order rather than on the
+    /// actual project contents. Build the same logical graph twice, inserting
+    /// entries into the map in opposite orders, and assert the output is
+    /// identical (and sorted by path) either way.
     #[test]
     fn build_graph_edges_is_deterministic_regardless_of_node_map_insertion_order() {
         let project_root = PathBuf::from("/project");
